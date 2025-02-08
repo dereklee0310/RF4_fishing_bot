@@ -26,9 +26,12 @@ import script
 from player import Player
 from setting import COMMON_CONFIGS, SPECIAL_CONFIGS, Setting
 
-# logging.BASIC_FORMAT: %(levelname)s:%(name)s:%(message)s
-# timestamp: %(asctime)s, datefmt='%Y-%m-%d %H:%M:%S',
-logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
+from yacs.config import CfgNode as CN
+from config.config import setup_cfg, dict_to_cfg
+
+format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+datefmt = "%Y-%m-%d %H:%M:%S"
+logging.basicConfig(level=logging.INFO, format=format, datefmt=datefmt)
 logger = logging.getLogger(__name__)
 
 # ------------------------- flag name 1, help message ------------------------ #
@@ -92,30 +95,33 @@ ASCII_LOGO = """
 ╚═╝  ╚═╝╚═╝          ╚═╝╚══════╝"""
 # https://patorjk.com/software/taag/#p=testall&f=3D-ASCII&t=RF4S%0A, ANSI Shadow
 
+ROOT = Path(__file__).resolve().parents[1]
 
 class App:
     """Main application class."""
 
     def __init__(self):
         """Merge args into setting node."""
-        self.setting = None  # dummy setting, parse args first for help message
         self.pid = None
         self.player = None
         self.table = None
 
-        self._build_setting_args()
-        self._verify_args()
+        self.cfg = setup_cfg()
+        self.cfg.merge_from_file(ROOT / "config.yaml")
 
-        if self.args.email and self.setting.SMTP_validation_enabled:
-            self._validate_smtp_connection()
-        if self.setting.image_verification_enabled:
-            self._verify_image_file_integrity()
+        # Parser will use the last occurence if the arguments are duplicated,
+        # so put argv at the end to overwrite launch options.
+        args_list = shlex.split(self.cfg.SCRIPT.LAUNCH_OPTIONS) + sys.argv[1:]
+        args = self._setup_parser().parse_args(args_list)
+        if not self._is_args_valid(args):
+            sys.exit(1)
+        args_cfg = CN()
+        args_cfg["ARGS"] = dict_to_cfg(vars(args)) # Avoid naming confliction
+        self.cfg.merge_from_other_cfg(args_cfg)
 
-        # all checks passed, merge args into setting node
-        args_attributes = COMMON_ARGS + SPECIAL_ARGS
-        self.setting.merge_args(self.args, args_attributes)
-        fishes_to_catch = self.setting.keepnet_limit - self.setting.fishes_in_keepnet
-        self.setting.fishes_to_catch = fishes_to_catch
+        if not self._is_smtp_valid() or not self._is_images_valid():
+            sys.exit(1)
+        self.cfg.freeze()
 
     def _setup_parser(self) -> ArgumentParser:
         """Configure argparser."""
@@ -192,65 +198,36 @@ class App:
 
         return parser
 
-    def _build_setting_args(self) -> None:
-        """Build args from command line arguments and configuration file.
+    def _is_args_valid(self, args: Namespace) -> bool:
+        if not 0 <= args.fishes_in_keepnet < self.cfg.SCRIPT.KEEPNET_CAPACITY:
+            logger.critical(
+                "Invalid number of fishes in keepnet: '%s'",
+                args.fishes_in_keepnet
+            )
+            return False
 
-        Parse the command line arguments first to display the help message before
-        attempting to locate the game window when initializing Setting node, then merge
-        the parsed dictionary with the default arguments in config.ini without
-        overwriting them.
-        """
-        # parse command line arguments first for help
-        parser = self._setup_parser()
-        command_line_args = vars(parser.parse_args())
+        if args.pid is not None and not self._is_pid_valid(str(args.pid)):
+            logger.critical("Invalid profile id: '%s'", args.pid)
+            return False
 
-        # merge with default arguments
-        self.setting = Setting()
-        default_arguments_list = shlex.split(self.setting.default_arguments)
-        default_args = vars(parser.parse_args(default_arguments_list))
-        for k, v in default_args.items():
-            if (v is None or not v) and command_line_args[k] is not None:
-                default_args[k] = command_line_args[k]
-
-        self.args = Namespace(**default_args)
-
-    def _verify_args(self) -> None:
-        """Verify args that comes with an argument."""
-
-        # verify number of fishes in keepnet
-        if not 0 <= self.args.fishes_in_keepnet < self.setting.keepnet_limit:
-            logger.error("Invalid number of fishes in keepnet")
-            sys.exit()
-
-        # pid has no fallback value, check if it's None
-        if self.args.pid is not None and not self._is_pid_valid(str(self.args.pid)):
-            logger.error("Invalid profile id")
-            sys.exit()
-        self.pid = self.args.pid
-
-        # pname -> pid
-        if self.args.pname is not None:
-            try:
-                self.pid = self.setting.profile_names.index(self.args.pname)
-            except ValueError:
-                logger.error("Invalid profile name")
-                sys.exit()
+        if args.pname is not None and args.pname not in self.cfg.PROFILE:
+            logger.critical("Invalid profile name: '%s'", args.pname)
+            return False
 
         # boat_ticket_duration already checked by choices[...]
 
+        return True
+
     def _is_pid_valid(self, pid: str) -> bool:
-        """Validate the profile id.
+        """Validate the profile id."""
+        return pid.isdigit() and 0 <= int(pid) < len(self.cfg.PROFILE)
 
-        :param pid: user profile id
-        :type pid: str
-        :return: True if valid, False otherwise
-        :rtype: bool
-        """
-        return pid.isdigit() and 0 <= int(pid) < len(self.setting.profile_names)
-
-    def _validate_smtp_connection(self) -> None:
+    def _is_smtp_valid(self) -> None:
         """Validate email configuration in .env."""
-        logger.info("Validating SMTP connection")
+        if not self.cfg.ARGS.EMAIL or not self.cfg.SCRIPT.SMTP_VERIFICATION:
+            return True
+
+        logger.debug("Verifying SMTP connection...")
 
         load_dotenv()
         email = os.getenv("EMAIL")
@@ -258,14 +235,14 @@ class App:
         smtp_server_name = os.getenv("SMTP_SERVER")
 
         if not smtp_server_name:
-            logger.error("SMTP_SERVER is not specified")
-            sys.exit()
+            logger.critical("SMTP_SERVER is not specified")
+            return False
 
         try:
             with smtplib.SMTP_SSL(smtp_server_name, 465) as smtp_server:
                 smtp_server.login(email, password)
         except smtplib.SMTPAuthenticationError:
-            logger.error("Email address or password not accepted")
+            logger.critical("Email address or password not accepted")
             print(
                 (
                     "Please configure your email address and password in .env\n"
@@ -274,99 +251,60 @@ class App:
                     "to get more information about app password authentication"
                 )
             )
-            sys.exit()
+            return False
         except (TimeoutError, gaierror):
-            logger.error("Invalid SMTP Server or connection timed out")
-            sys.exit()
+            logger.critical("Invalid SMTP Server or connection timed out")
+            return False
+        return True
 
-    def _verify_image_file_integrity(self) -> None:
+    def _is_images_valid(self) -> None:
         """Verify the file integrity of static/{language}.
 
         Compare files in static/en and static/{language}
         and print missing files in static/{language}.
         """
-        logger.info("Verifying file integrity")
+        if not self.cfg.SCRIPT.IMAGE_VERIFICATION:
+            return True
 
-        image_dir = self.setting.image_dir
-        if image_dir == "../static/en/":
-            return
+        logger.debug("Verifying image files...")
+        if self.cfg.SCRIPT.LANGUAGE == "en":
+            return True
 
-        target_images = os.listdir("../static/en/")  # use en version as reference
+        image_dir = ROOT / "static" / self.cfg.SCRIPT.LANGUAGE
         try:
-            current_images = os.listdir(image_dir)
+            current_images = [f for f in image_dir.iterdir() if f.is_file()]
         except FileNotFoundError:
-            logger.error("Directory %s not found", image_dir)
-            print("Please check your language setting in config.ini")
-            sys.exit()
-
+            logger.critical("Invalid language: '%s'", self.cfg.SCRIPT.LANGUAGE)
+            return False
+        template_dir = ROOT / "static" / "en"
+        target_images = [f for f in template_dir.iterdir() if f.is_file()]
         missing_images = set(target_images) - set(current_images)
-        if len(missing_images) != 0:
-            logger.error("Integrity check failed")
-            print("Please refer to docs/integrity_guide.md")
+        if len(missing_images) > 0:
+            logger.critical("Integrity check failed")
             table = PrettyTable(header=False, align="l", title="Missing Images")
             for filename in missing_images:
                 table.add_row([filename])
             print(table)
-            sys.exit()
-
-    def _build_args_table(self) -> None:
-        """Append command line arguments to existing table."""
-        arg_table = COMMON_ARGS + SPECIAL_ARGS
-        for i, (_, attribute_name, column_name) in enumerate(arg_table):
-            attribute_value = getattr(self.setting, attribute_name)
-            if isinstance(attribute_value, bool):
-                attribute_value = "enabled" if attribute_value else "disabled"
-            divider = i == len(arg_table) - 1
-            self.table.add_row([column_name, attribute_value], divider=divider)
-
-    def _build_user_config_table(self) -> None:
-        """Append user profile to existing table."""
-        self.table.add_row(["Profile name", self.setting.profile_names[self.pid]])
-
-        for attribute_name, column_name, _ in COMMON_CONFIGS:
-            attribute_value = getattr(self.setting, attribute_name)
-            self.table.add_row([column_name, attribute_value])
-
-        special_configs = SPECIAL_CONFIGS.get(self.setting.fishing_strategy)
-        for attribute_name, column_name, _ in special_configs:
-            attribute_value = getattr(self.setting, attribute_name)
-            self.table.add_row([column_name, attribute_value])
+            return False
 
     def display_available_profiles(self) -> None:
         """List available user profiles from setting node."""
         table = PrettyTable(header=False, align="l")
-        table.title = "Welcome! Please select a profile id to use it"
-        for i, profile in enumerate(self.setting.profile_names):
+        table.title = "Welcome! Select a profile to start"
+        for i, profile in enumerate(self.cfg.PROFILE):
             table.add_row([f"{i:>2}. {profile}"])
         print(table)
 
     def ask_for_pid(self) -> None:
         """Get and validate user profile id from user input."""
-        pid = input("Enter profile id or press q to exit: ")
+        print("Enter profile id to use it, q to exit.")
+        pid = input(">>> ")
         while not self._is_pid_valid(pid):
             if pid.strip() == "q":
                 sys.exit()
             print("Invalid profile id, please try again.")
-            pid = input("Profile id: ")
+            pid = input(">>> ")
         self.pid = int(pid)
-
-        if self.pid == 0:
-            os.startfile(Path(__file__).resolve().parents[1] / "config.ini")
-            print("Save it before restarting the script to apply changes")
-            sys.exit()
-
-    def create_player(self) -> None:
-        """Generate a player object from args and configuration file."""
-        # use pid to merge user profile into setting before passing it as argument
-        self.setting.merge_user_configs(self.pid)
-        self.player = Player(self.setting)
-
-    def display_settings(self) -> None:
-        """Display args and user profile."""
-        self.table = PrettyTable(header=False, align="l", title="Setings")
-        self._build_args_table()
-        self._build_user_config_table()
-        print(self.table)
 
     def on_release(self, key: keyboard.KeyCode) -> None:
         """Callback for button release.
@@ -375,31 +313,26 @@ class App:
         :type key: keyboard.KeyCode
         """
         if key == keyboard.KeyCode.from_char(self.setting.quitting_shortcut):
-            logger.info("Shutting down...")
             os.kill(os.getpid(), signal.CTRL_C_EVENT)
             sys.exit()
 
 
 if __name__ == "__main__":
-    app = App()
-
     print(ASCII_LOGO)
     print("https://github.com/dereklee0310/RussianFishing4Script")
-
+    app = App()
     if app.pid is None:
         app.display_available_profiles()
         app.ask_for_pid()
-    app.create_player()
-    app.display_settings()
+    app.player = Player(app.cfg)
+    print(app.cfg) # cfg.dump() doesn't preserve order, but idgaf
 
+    #TODO: Update coords and Window()
     if script.verify_window_size(app.setting):
         app.setting.set_absolute_coords()
-
-    if app.setting.confirmation_enabled:
-        script.ask_for_confirmation("Do you want to continue with the settings above")
     app.setting.window_controller.activate_game_window()
 
-    if app.setting.quitting_shortcut != "Ctrl-C":
+    if app.cfg.KEY.QUIT != "CTRL-C":
         listener = keyboard.Listener(on_release=app.on_release)
         listener.start()
 

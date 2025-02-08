@@ -638,6 +638,7 @@ class Player:
         pag.press("space")
 
         self.keep_fish_count += 1
+        # cfg.GENERAL.KEEPNET_CAPACITY - cfg.ARGS.FISHES_IN_KEEPNET
         if self.keep_fish_count == self.setting.fishes_to_catch:
             self._handle_full_keepnet()
 
