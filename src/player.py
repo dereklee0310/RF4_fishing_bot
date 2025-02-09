@@ -64,20 +64,20 @@ class Player:
     # there are too many counters...
     # setting node's attributes will be merged on the fly
 
-    def __init__(self, setting: Setting):
+    def __init__(self, cfg):
         """Initialize monitor, timer, timer and some trivial counters.
 
         :param setting: universal setting node, initialized in App()
         :type setting: Setting
         """
-        self.setting = setting
-        self.monitor = Monitor(setting)
-        if setting.rainbow_line_enabled:
+        self.cfg = cfg
+        self.monitor = Monitor(cfg)
+        if cfg.ARGS.RAINBOW_LINE:
             self.monitor.is_retrieval_finished = self.monitor._is_rainbow_line_0or5m
         else:
             self.monitor.is_retrieval_finished = self.monitor._is_spool_full
         self.timer = Timer()
-        self.tackle = Tackle(self.setting, self.monitor, self.timer)
+        self.tackle = Tackle(cfg, self.monitor, self.timer)
 
         self.telescopic = self.setting.fishing_strategy  # for acceleration
         if self.telescopic == "float":
