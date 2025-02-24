@@ -26,7 +26,7 @@ CAST_SCALE = 0.4  # 25% / 0.4s
 BASE_DELAY = 1
 LOOP_DELAY = 2
 
-ANIMATION_DELAY = 0.5
+ANIMATION_DELAY = 1
 
 RETRIEVAL_TIMEOUT = 32
 PULL_TIMEOUT = 16
@@ -44,7 +44,7 @@ NUM_OF_MOVEMENT = 4
 class Tackle:
     """Class for all tackle dependent methods."""
 
-    def __init__(self, cfg, timer: Timer, window_is_valid):
+    def __init__(self, cfg, timer: Timer, detection: Detection):
         """Get timer and setting from caller (Player).
 
         :param setting: universal setting node
@@ -55,8 +55,8 @@ class Tackle:
         :type timer: Timer
         """
         self.cfg = cfg
-        self.detection = Detection(cfg, window_is_valid)
         self.timer = timer
+        self.detection = detection
         self.landing_net_out = False  # for telescopic_pull()
         self.available = True
 
@@ -99,8 +99,6 @@ class Tackle:
                 raise exceptions.LineAtEndError
             if self.cfg.SCRIPT.SNAG_DETECTION and self.detection.is_line_snagged():
                 raise exceptions.LineSnaggedError
-            if self.detection.is_groundbait_not_chosen():
-                raise exceptions.GroundbaitNotChosenError
             i = utils.sleep_and_decrease(i, LOOP_DELAY)
 
         raise TimeoutError
@@ -348,21 +346,51 @@ class Tackle:
             win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, x, y, 0, 0)
             sleep(ANIMATION_DELAY)
 
+
     def change_lure(self) -> None:
-        """Open menu, select a random lure and replace the current one."""
-        logger.info("Search for favorite items")
-        with pag.hold("b"):
+        logger.info("Changing lure")
+        self._change_item_from_menu(item="lure")
+
+    def change_dry_mix(self) -> None:
+        logger.info("Changing dry mix")
+        self._change_item_from_menu(item="dry_mix")
+
+    def change_pva(self) -> None:
+        logger.info("Changing PVA")
+        self._change_item_from_menu(item="pva")
+
+    def change_groundbait(self) -> None:
+        logger.info("Changing groundbait")
+        self._change_item_from_menu(item="groundbait")
+
+
+    def _change_item_from_menu(self, item) -> None:
+        logger.info("Searching item")
+        menu_key = "h" if item == "pva" else "b"
+        with pag.hold(menu_key):
             sleep(ANIMATION_DELAY)
-            favorite_item_positions = list(self.detection.get_favorite_item_positions())
-            random.shuffle(favorite_item_positions)
-            for favorite_item_position in favorite_item_positions:
-                # check if the lure for replacement is already broken
-                x, y = utils.get_box_center(favorite_item_position)
-                if pag.pixel(x - 75, y + 190) != (178, 59, 30):  # magic value
-                    logger.info("The lure has been replaced")
-                    pag.moveTo(x - 75, y + 190)
-                    pag.click()
-                    break
-                logger.warning("Lure for replacement found but already broken")
-            logger.warning("Lure for replacement not found, stay unchanged")
-        sleep(ANIMATION_DELAY)
+            min_y = self.detection.get_baits_title_position()[1]
+            candidates = list(self.detection.get_favorite_item_positions())
+            if item == "lure":
+                random.shuffle(candidates)
+            replaced = False
+            for candidate in candidates:
+                # Check if the lure for replacement is already broken
+                x, y = utils.get_box_center(candidate)
+                if (item == "groundbait" and y < min_y or
+                    item == "lure" and pag.pixel(x - 60, y + 190) == (178, 59, 30)):
+                    continue
+
+                pag.moveTo(x - 60, y + 190)
+                pag.click()
+                logger.info("Item changed successfully")
+                replaced = True
+                break
+
+        if replaced:
+            sleep(ANIMATION_DELAY)
+            return
+
+        logger.error("Failed to find an item to replace")
+        if item == "pva":
+            self.available = False # Skip casting

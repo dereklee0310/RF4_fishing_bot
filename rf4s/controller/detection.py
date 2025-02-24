@@ -88,7 +88,7 @@ class Detection:
 
     # pylint: disable=too-many-public-methods
 
-    def __init__(self, cfg, window_is_valid):
+    def __init__(self, cfg, window_is_supported):
         """Initialize setting.
 
         :param setting: general setting node
@@ -98,7 +98,7 @@ class Detection:
         self.window_box = Window().get_box()
         self.image_dir = ROOT / "static" / cfg.SCRIPT.LANGUAGE
 
-        if window_is_valid:
+        if window_is_supported:
             self._set_absolute_coords()
 
     def _get_image_box(self, image: str, confidence: float, multiple: bool=False) -> Box | None:
@@ -231,6 +231,9 @@ class Detection:
 
     def is_bait_not_chosen(self):
         return self._get_image_box("bait_is_not_chosen", 0.7)
+
+    def is_pva_not_chosen(self):
+        return self._get_image_box("pva_is_not_chosen", 0.7)
 
     # ------------------------------ hint detection ------------------------------ #
     def is_disconnected(self):
@@ -399,3 +402,11 @@ class Detection:
             c > MIN_GRAY_SCALE_LEVEL
             for c in pag.pixel(*self.clip_icon_coord)
         )
+
+
+    def get_groundbait_slot_position(self) -> bool:
+        return self._get_image_box("groundbait_slot", 0.98)
+
+
+    def get_baits_title_position(self) -> Box:
+        return self._get_image_box("baits", 0.9)

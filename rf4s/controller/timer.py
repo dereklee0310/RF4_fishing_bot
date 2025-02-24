@@ -113,7 +113,7 @@ class Timer:
             return True
         return False
 
-    def is_spod_rod_recastable(self):
+    def is_spod_rod_castable(self):
         cur_time = time.time()
         if cur_time - self.last_spod_rod_recast > self.cfg.SCRIPT.GROUNDBAIT_REFILL_DELAY:
             self.last_spod_rod_recast = cur_time

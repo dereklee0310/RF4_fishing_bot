@@ -23,7 +23,6 @@ from rich import print, box
 from rich.panel import Panel
 from rich.table import Table, Column
 from rich.console import Console
-from rich.prompt import Prompt
 from rich.text import Text
 
 sys.path.append(".") # python -m module -> python file
@@ -52,7 +51,7 @@ ARGUMENTS = (
     ("g", "gear_ratio", "switch the gear ratio after the retrieval timed out"),
     ("f", "friction_brake", "enable auto friction brake"),
     ("l", "lift", "lift the tackle constantly while pulling a fish"),
-    ("C", "skip_cast", "skip casting for the first fish, mode: spin, marine"), # TODO
+    ("C", "skip_cast", "skip to retrieving for the first fish, mode: spin, marine"), # TODO
     ("o", "spod_rod", "recast spod rod regularly"),
     ("L", "lure", "change current lure with a random one regularly"),
     ("x", "mouse", "move mouse randomly before casting the rod"),
@@ -66,7 +65,6 @@ ARGUMENTS = (
     ("gb", "groundbait", "enable groundbait refill, mode: bottom"),
     ("dm", "dry_mix", "enable dry mix refill, mode: bottom"),
     ("pva", "pva", "enable pva refill, mode: bottom"),
-    ("bl", "broken_lure", "enable broken lure auto-replace, mode: spin, marine"), # TODO
 )
 
 LOGO = """
@@ -80,9 +78,6 @@ LINK = "https://github.com/dereklee0310/RussianFishing4Script"
 # https://patorjk.com/software/taag/#p=testall&f=3D-ASCII&t=RF4S%0A, ANSI Shadow
 
 ROOT = Path(__file__).resolve().parents[1]
-
-class NoColonPrompt(Prompt):
-        prompt_suffix = " "
 
 class App:
     """Main application class."""
@@ -102,17 +97,16 @@ class App:
             sys.exit(1)
 
         # Process list-like values if possible
-        if "KEY.RODS" in args.opts:
-            value_idx = args.opts.index("KEY.RODS") + 1
+        if "KEY.BOTTOM_RODS" in args.opts:
+            value_idx = args.opts.index("KEY.BOTTOM_RODS") + 1
             args.opts[value_idx] = [x.strip() for x in args.opts[value_idx].split(",")]
-        self.cfg.merge_from_list(args.opts)
+        self.cfg.merge_from_list(args.opts) # Overwrite cfg
 
         args_cfg = CN({"ARGS": config.dict_to_cfg(vars(args))})
         self.cfg.merge_from_other_cfg(args_cfg)
         if not self._is_smtp_valid() or not self._is_images_valid():
             sys.exit(1)
 
-        self.window_is_valid = True
         self.console = Console()
 
     def _setup_parser(self) -> ArgumentParser:
@@ -173,7 +167,7 @@ class App:
 
         parser.add_argument(
             "-n",
-            "--fishes_in_keepnet",
+            "--fishes-in-keepnet",
             default=0,
             type=int,
             help="number of fishes in your keepnet, 0 by default",
@@ -181,13 +175,13 @@ class App:
         )
         parser.add_argument(
             "-t",
-            "--boat_ticket",
+            "--boat-ticket",
             nargs="?",
             const=5,
             type=int,
             choices=[1, 2, 3, 5],
             help=(
-                "enable boat ticket auto renewal, duration could be 1, 2, 3 or 5, "
+                "enable boat ticket auto renewal, DURATION: '1', '2', '3' or '5', "
                 "will use a 5 hour ticket if duration is not specified"
             ),
             metavar="DURATION",
@@ -200,12 +194,24 @@ class App:
             const="forward",
             type=str,
             choices=["forward", "left", "right"],
-            help=("enable trolling mode, direction could be forward, left, or right, "
-                  "will only move forward by press 'j' "
-                  "if direction is not specified"),
+            help=("enable trolling mode, DIRECTION: 'forward',''left', or 'right', "
+                  "will only move forward by press 'j' if direction is not specified"),
             metavar="DIRECTION",
         )
 
+        parser.add_argument(
+            "-bl",
+            "--broken-lure",
+            nargs="?",
+            const="replace",
+            type=str,
+            choices=["replace", "alarm"],
+            help=(
+                "enable broken lure auto-replace, ACTION: 'replace' or 'alarm', "
+                "will replace the broken lure if action is not specified"
+            ), # TODO
+            metavar="ACTION",
+        )
         return parser
 
     def _is_args_valid(self, args: Namespace) -> bool:
@@ -343,7 +349,7 @@ class App:
         print("Enter profile id to use, q to exit:")
 
         while True:
-            pid = NoColonPrompt.ask(prompt=">>>")
+            pid = input(">>> ")
             if self._is_pid_valid(pid):
                 break
             if pid == "q":
@@ -376,17 +382,24 @@ class App:
 
     def setup_window(self):
         self.window = Window()
-        if self.window.is_size_valid():
-            self.window_is_valid = True
-            return
+        width, height = self.window.get_box()[2:]
+        if self.window.title_bar_exist:
+            logger.info("Window mode detected. Please don't move the game window")
+        if not self.window.supported:
+            logger.warning(
+                "Invalid window size '%s', use '2560x1440', '1920x1080' or '1600x900'",
+                f"{width}x{height}",
+            )
+            logger.warning('Window mode must be "Borderless windowed" or "Window mode"')
+            logger.error("Snag detection will be disabled")
+            logger.error("Spooling detection will be disabled")
+            logger.error("Auto friction brake will be disabled")
 
-        self.window_is_valid = False
         self.cfg.ARGS.FRICTION_BRAKE = False
         self.cfg.SCRIPT.SNAG_DETECTION = False
         self.cfg.SCRIPT.SPOOLING_DETECTION = False
 
         if self.cfg.SELECTED.MODE in ("telescopic", "bolognese"):
-            width, height = self.window.get_box()[2:]
             logger.critical(
                 "Fishing mode '%s' doesn't support window size '%s'",
                 self.cfg.SELECTED.MODE,
@@ -395,7 +408,7 @@ class App:
             sys.exit(1)
 
     def _setup_player(self):
-        self.player = Player(self.cfg, self.window, self.window_is_valid)
+        self.player = Player(self.cfg, self.window)
 
     def _on_release(self, key: keyboard.KeyCode) -> None:
         """Callback for button release.
@@ -417,6 +430,9 @@ class App:
         if self.cfg.KEY.QUIT != "CTRL-C":
             listener = keyboard.Listener(on_release=self._on_release)
             listener.start()
+
+        # self.player._refill_ground_bait()
+        # exit()
 
         try:
             self.player.start_fishing()
