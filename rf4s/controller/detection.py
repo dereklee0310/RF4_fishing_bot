@@ -19,6 +19,7 @@ logger = logging.getLogger("rich")
 
 CRITICAL_COLOR = (206, 56, 21)
 WARNING_COLOR = (227, 149, 23)
+WHITE = (255, 255, 255)
 
 MIN_GRAY_SCALE_LEVEL = 150
 YELLOW_FRICTION_BRAKE = (200, 214, 63)
@@ -88,7 +89,7 @@ class Detection:
 
     # pylint: disable=too-many-public-methods
 
-    def __init__(self, cfg, window_is_valid):
+    def __init__(self, cfg, window_is_supported):
         """Initialize setting.
 
         :param setting: general setting node
@@ -98,7 +99,7 @@ class Detection:
         self.window_box = Window().get_box()
         self.image_dir = ROOT / "static" / cfg.SCRIPT.LANGUAGE
 
-        if window_is_valid:
+        if window_is_supported:
             self._set_absolute_coords()
 
     def _get_image_box(self, image: str, confidence: float, multiple: bool=False) -> Box | None:
@@ -118,13 +119,16 @@ class Detection:
 
     def _set_absolute_coords(self) -> None:
         """Add offsets to the base coordinates to get absolute ones."""
-        window_size_key = f"{self.window_box[2]}x{self.window_box[3]}"
-        self.coord_offsets = COORD_OFFSETS[window_size_key]
+        window_size = f"{self.window_box[2]}x{self.window_box[3]}"
+        self.coord_offsets = COORD_OFFSETS[window_size]
 
-        self.fish_icon_coord = self._get_absolute_coord("fish_icon")
-        self.spool_icon_coord = self._get_absolute_coord("spool_icon")
-        self.snag_icon_coord = self._get_absolute_coord("snag_icon")
-        self.clip_icon_coord = self._get_absolute_coord("clip_icon")
+        for key, value in self.coord_offsets.items():
+            setattr(self, f"{key}_coord", self._get_absolute_coord(key))
+
+        # self.fish_icon_coord = self._get_absolute_coord("fish_icon")
+        # self.spool_icon_coord = self._get_absolute_coord("spool_icon")
+        # self.snag_icon_coord = self._get_absolute_coord("snag_icon")
+        # self.clip_icon_coord = self._get_absolute_coord("clip_icon")
         friction_brake_key = f"friction_brake_{self.cfg.FRICTION_BRAKE.SENSITIVITY}"
         self.friction_brake_coord = self._get_absolute_coord(friction_brake_key)
 
@@ -226,12 +230,6 @@ class Detection:
     def is_moving_in_bottom_layer(self):
         return self._get_image_box("movement", 0.7)
 
-    def is_groundbait_not_chosen(self):
-        return self._get_image_box("groundbait", 0.7)
-
-    def is_bait_not_chosen(self):
-        return self._get_image_box("bait_is_not_chosen", 0.7)
-
     # ------------------------------ hint detection ------------------------------ #
     def is_disconnected(self):
         return self._get_image_box("disconnected", 0.9)
@@ -313,6 +311,7 @@ class Detection:
         return self._get_image_box("100wear", 0.98)
 
     def get_favorite_item_positions(self):
+        # TODO
         return self._get_image_box("favorite", 0.95, multiple=True)
 
     # ---------------------------------------------------------------------------- #
@@ -399,3 +398,20 @@ class Detection:
             c > MIN_GRAY_SCALE_LEVEL
             for c in pag.pixel(*self.clip_icon_coord)
         )
+
+    def is_pva_chosen(self):
+        # return pag.pixel(*self.pva_icon_coord) != WHITE
+        return self._get_image_box("pva_icon", 0.6) is None
+
+    def is_groundbait_chosen(self):
+        return self._get_image_box("groundbait_icon", 0.6) is None
+
+    def is_bait_chosen(self):
+        return self._get_image_box("bait_icon", 0.6) is None
+
+
+    def get_groundbait_position(self):
+        return self._get_image_box("classic_feed_mix", 0.95)
+
+    def get_dry_mix_position(self):
+        return self._get_image_box("dry_feed_mix", 0.95)

@@ -28,6 +28,8 @@ class Window:
         self._title = game_window_title
         self._script_hwnd = self._get_cur_hwnd()
         self._game_hwnd = self._get_game_hwnd()
+        self.title_bar_exist = self._is_title_bar_exist()
+        self.supported = self._is_size_supported()
 
     def _get_cur_hwnd(self) -> int:
         """Get the handle of the terminal.
@@ -50,7 +52,7 @@ class Window:
             sys.exit()
         return hwnd
 
-    def is_title_bar_exist(self) -> bool:
+    def _is_title_bar_exist(self) -> bool:
         """Check if the game window is in windowed mode.
 
         :return: True if yes, False otherwise
@@ -61,7 +63,7 @@ class Window:
 
     def get_box(self):
         base_x, base_y, _, _ = win32gui.GetWindowRect(self._game_hwnd)
-        if self.is_title_bar_exist():
+        if self._is_title_bar_exist():
             base_x += 8
             base_y += 31
         left, top, right, bottom = win32gui.GetClientRect(self._game_hwnd)
@@ -86,21 +88,10 @@ class Window:
         sleep(0.25)
 
 
-    def is_size_valid(self) -> bool:
-        if self.is_title_bar_exist():
-            logger.info("Window mode detected. Please don't move the game window")
+    def _is_size_supported(self) -> bool:
         width, height = self.get_box()[2:]
-        if (width, height) in ((2560, 1440), (1920, 1080), (1600, 900)):
+        if self.get_box()[2:] in ((2560, 1440), (1920, 1080), (1600, 900)):
             return True
-
-        logger.warning(
-            "Invalid window size '%s', use '2560x1440', '1920x1080' or '1600x900'",
-            f"{width}x{height}",
-        )
-        logger.warning('Window mode must be "Borderless windowed" or "Window mode"')
-        logger.error("Snag detection will be disabled")
-        logger.error("Spooling detection will be disabled")
-        logger.error("Auto friction brake will be disabled")
         return False
 
     def save_screenshot(self, time) -> None:

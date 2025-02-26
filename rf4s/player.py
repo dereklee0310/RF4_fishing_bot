@@ -33,6 +33,7 @@ from rf4s.component.tackle import Tackle
 from rf4s.controller.detection import Detection
 from rf4s.controller.timer import Timer
 from rf4s.config import config
+from rf4s.controller.window import Window
 
 logger = logging.getLogger("rich")
 random.seed(datetime.now().timestamp())
@@ -65,7 +66,7 @@ class Player:
     # there are too many counters...
     # setting node's attributes will be merged on the fly
 
-    def __init__(self, cfg, window, window_is_valid):
+    def __init__(self, cfg, window: Window):
         """Initialize monitor, timer, timer and some trivial counters.
 
         :param setting: universal setting node, initialized in App()
@@ -73,21 +74,30 @@ class Player:
         """
         self.cfg = cfg
         self.window = window
-        self.window_is_valid = window_is_valid
-        self.detection = Detection(cfg, window_is_valid)
         self.timer = Timer(cfg)
-        self.tackle = Tackle(cfg, self.timer, window_is_valid)
-        self.special_cast_miss = self.cfg.SELECTED.MODE in ["bottom", "marine"]
-        self.friction_brake_lock = Lock()
-        self.friction_brake = FrictionBrake(cfg, self.friction_brake_lock, window_is_valid)
+        self.detection = Detection(cfg, window.supported)
 
-        # fish count and bite rate
+        self.tackle_idx = 0
+        if self.cfg.SELECTED.MODE == "bottom":
+            self.num_tackle = len(self.cfg.KEY.BOTTOM_RODS)
+        else:
+            self.num_tackle = 1
+        self.tackles = [
+            Tackle(cfg, self.timer, self.detection)
+            for _ in range(self.num_tackle)
+        ]
+        self.tackle = self.tackles[self.tackle_idx]
+
+        self.friction_brake_lock = Lock()
+        self.friction_brake = FrictionBrake(
+            cfg, self.friction_brake_lock, self.detection
+        )
+
         self.cast_miss_count = 0
         self.keep_fish_count = 0
         self.marked_count = 0
         self.unmarked_count = 0
 
-        # item use count
         self.tea_count = 0
         self.carrot_count = 0
         self.alcohol_count = 0
@@ -95,9 +105,14 @@ class Player:
         self.total_coffee_count = 0
         self.harvest_count = 0
 
+        self.have_new_lure = True
+        self.have_new_groundbait = True
+        self.have_new_dry_mix = True
+        self.have_new_pva = True
+
     def start_fishing(self) -> None:
         """Start main fishing loop with specified fishing strategt."""
-        if self.cfg.ARGS.FRICTION_BRAKE and self.window_is_valid:
+        if self.cfg.ARGS.FRICTION_BRAKE:
             logger.info("Spawing new process, do not quit the script")
             self.friction_brake.monitor_process.start()
 
@@ -110,6 +125,32 @@ class Player:
         self._start_trolling()
         getattr(self, f"start_{self.cfg.SELECTED.MODE}_mode")()
 
+    def _update_tackle(self) -> None:
+        candidates = self._get_available_rods()
+        if not candidates:
+            self.general_quit("All rods are unavailable")
+        if self.cfg.SCRIPT.RANDOM_ROD_SELECTION:
+            self.tackle_idx = random.choice(candidates)
+        else:
+            self.tackle_idx = candidates[0]
+        self.tackle = self.tackles[self.tackle_idx]
+
+    def _get_available_rods(self) -> bool:
+        if self.num_tackle == 1 and self.tackle.available:
+            return [self.tackle]
+
+        candidates = list(range(len(self.tackles)))
+        # Rotate the candidates for sequential polling
+        start = candidates.index(self.tackle_idx)
+        candidates = candidates[start:] + candidates[:start]
+        candidates = [i for i in candidates if self.tackles[i].available]
+
+        #  Exclude current rod only if there's another available tackle
+        if len(candidates) > 1 and self.tackle_idx in candidates:
+            candidates.remove(self.tackle_idx)
+        return candidates
+
+
     # ---------------------------------------------------------------------------- #
     #                              main fishing loops                              #
     # ---------------------------------------------------------------------------- #
@@ -121,12 +162,11 @@ class Player:
                 self._refill_stats()
                 self._harvest_baits(pickup=True)
                 self._reset_tackle()
-                if self.cfg.ARGS.LURE and self.timer.is_lure_changeable():
-                    self.tackle.change_lure()
+                self._change_tackle_lure()
                 self._cast_tackle()
             skip_cast = False
 
-            if self.cfg.SELECTED.RETRIEVE_DURATION > 0:
+            if self.cfg.SELECTED.TYPE != "normal":
                 utils.hold_mouse_button(self.cfg.SELECTED.TIGHTEN_DURATION)
                 getattr(self.tackle, f"retrieve_with_{self.cfg.SELECTED.TYPE}")()
             self._retrieve_line()
@@ -136,35 +176,80 @@ class Player:
             else:
                 self.cast_miss_count += 1
 
+    def _change_tackle_lure(self) -> None:
+        if not self.cfg.ARGS.LURE or not self.have_new_lure:
+            return
+
+        if self.timer.is_lure_changeable():
+            logger.info("Changing lure randomly")
+            try:
+                self.tackle.equip_item("lure")
+            except exceptions.ItemNotFoundError:
+                logger.error("New lure not found")
+                self.have_new_lure = False
+        else:
+            logger.info("Keep using the same lure")
+
+    def _refill_pva(self) -> None:
+        if not self.cfg.ARGS.PVA or not self.have_new_pva:
+            return
+
+        if self.detection.is_pva_chosen():
+            logger.info("Pva is not used up yet")
+        else:
+            logger.info("Pva has been used up")
+            try:
+                self.tackle.equip_item("pva")
+            except exceptions.ItemNotFoundError:
+                logger.error("New pva not found")
+                self.have_new_pva = False
+
+    def _refill_dry_mix(self) -> None:
+        if not self.cfg.ARGS.DRY_MIX or not self.have_new_dry_mix:
+            return
+        try:
+            self.tackle.equip_item("dry_mix")
+        except exceptions.ItemNotFoundError:
+            logger.error("New dry mix not found")
+            self.have_new_dry_mix = False
+
+    def _refill_groundbait(self) -> None:
+        if not self.cfg.ARGS.GROUNDBAIT or not self.have_new_groundbait:
+            return
+
+        if self.detection.is_groundbait_chosen():
+            logger.info("Groundbait is not used up yet")
+        else:
+            try:
+                self.tackle.equip_item("groundbait")
+            except exceptions.ItemNotFoundError:
+                logger.error("New groundbait not found")
+                self.have_new_groundbait = False
+
     def start_bottom_mode(self) -> None:
         """Main bottom fishing loop."""
-        self.rod_count = len(self.cfg.KEY.RODS)
-        self.rod_idx = 0
-        self.available_rods = [True] * self.rod_count
-        check_miss_counts = [0] * self.rod_count
+        check_miss_counts = [0] * self.num_tackle
 
         while True:
-            if self.cfg.ARGS.SPOD_ROD and self.timer.is_spod_rod_recastable():
+            if self.cfg.ARGS.SPOD_ROD and self.timer.is_spod_rod_castable():
                 self._cast_spod_rod()
             self._refill_stats()
             self._harvest_baits()
 
-            if self._update_rod_idx():
-                self.tackle.available = True
-            else:
-                self.general_quit("All rods are unavailable")
-
-            logger.info("Checking rod %s", self.rod_idx + 1)
-            pag.press(str(self.cfg.KEY.RODS[self.rod_idx]))
+            logger.info("Checking rod %s", self.tackle_idx + 1)
+            pag.press(str(self.cfg.KEY.BOTTOM_RODS[self.tackle_idx]))
             sleep(ANIMATION_DELAY)
             if self.detection.is_fish_hooked():
-                check_miss_counts[self.rod_idx] = 0
+                check_miss_counts[self.tackle_idx] = 0
                 self._retrieve_line()
                 self._pull_fish()
                 self._reset_tackle()
+                self._refill_groundbait()
+                self._refill_pva()
                 self._cast_tackle(lock=True)
             else:
                 self._put_down_tackle(check_miss_counts)
+            self._update_tackle()
 
     def start_pirk_mode(self) -> None:
         """Main marine fishing loop."""
@@ -276,23 +361,6 @@ class Player:
     # ---------------------------------------------------------------------------- #
     #            stages and their helper functions in main fishing loops           #
     # ---------------------------------------------------------------------------- #
-    def _update_rod_idx(self) -> int:
-        if self.rod_count == 1 and self.available_rods[0]:
-            return True
-
-        candidates = [i for i, status in enumerate(self.available_rods) if status]
-        if len(candidates) > 1 and self.rod_idx in candidates:
-            #  Exclude current rod only if there's another available rod
-            candidates.remove(self.rod_idx)
-
-        if not candidates:
-            logger.critical("All rods are unavailable")
-            return False
-        if self.cfg.SCRIPT.RANDOM_ROD_SELECTION:
-            self.rod_idx = random.choice(candidates)
-        else:
-            self.rod_idx = (candidates.index(self.rod_idx) + 1) % len(candidates)
-        return True
 
     def _harvest_baits(self, pickup=False) -> None:
         """Harvest the bait."""
@@ -393,11 +461,16 @@ class Player:
             self._handle_broken_lure()
             return
 
-        if self.detection.is_bait_not_chosen():
-            if self.cfg.SELECTED.MODE != "bottom":
+        if not self.detection.is_groundbait_chosen():
+            self._refill_dry_mix()
+            return
+
+        if not self.detection.is_bait_chosen():
+            if len(self.tackles) == 1:
                 self.general_quit("Run out of bait")
-            self.available_rods[self.rod_idx] = False
             self.tackle.available = False
+            return
+
         while True:
             try:
                 self.tackle.reset()
@@ -412,28 +485,23 @@ class Player:
                 self.general_quit("Fishing line is at its end")
             except exceptions.LineSnaggedError:
                 self._handle_snagged_line()
-            except exceptions.GroundbaitNotChosenError:
-                # Put tackle down to avoid invalid cast
-                pag.press("0")
-                return
             except TimeoutError:  # rare events
                 self._handle_timeout()
 
+
     def _handle_snagged_line(self):
-        if self.cfg.SELECTED.MODE != "bottom":
+        if len(self.tackles):
             self.general_quit("Line is snagged")
-        self.available_rods[self.rod_idx] = False
         self.tackle.available = False
 
     def _cast_spod_rod(self):
-        logger.info("Recasting spod rod")
         self._access_item("spod_rod")
         sleep(ANIMATION_DELAY)
         self._reset_tackle()
 
-        # Just skip it
-        if not self.available_rods[self.rod_idx]:
-            self.available_rods[self.rod_idx] = True
+        # If no dry mix is available, skip casting
+        if not self.tackle.available:
+            self.tackle.available = True
             return
         self._cast_tackle(lock=True, update=False)
         pag.press("0")
@@ -469,18 +537,17 @@ class Player:
 
     def _handle_broken_lure(self):
         """Handle the broken lure event according to the settings."""
-        msg = "Lure is broken"
-        logger.warning(msg)
-        match self.cfg.LURE.BROKEN_ACTION:
-            case "alarm":
-                self._handle_termination(msg, shutdown=False)
+        match self.cfg.ARGS.BROKEN_LURE:
             case "replace":
                 self._replace_broken_lures()
-                return
-            case "quit":
-                self.general_quit(msg)
+            case "alarm":
+                playsound(str(Path(self.cfg.SCRIPT.ALARM_SOUND).resolve()))
+                self.window.activate_script_window()
+                print("Please replace your lure")
+                print(input("Press enter to continue..."))
+                self.window.activate_game_window()
             case _:
-                raise ValueError
+                self.general_quit("Broken lure auto-replace is disabled")
 
     @utils.release_keys_after
     def _handle_termination(self, msg: str, shutdown: bool) -> None:
@@ -631,7 +698,7 @@ class Player:
             self._handle_full_keepnet()
 
         # Avoid wrong cast hour
-        if self.special_cast_miss:
+        if self.cfg.SELECTED.MODE in ["bottom", "pirk", "elevator"]:
             self.timer.update_cast_time()
         self.timer.add_cast_time()
 
@@ -639,9 +706,10 @@ class Player:
         msg = "Keepnet is full"
         match self.cfg.KEEPNET.FULL_ACTION:
             case "alarm":
-                logger.error(msg)
                 playsound(str(Path(self.cfg.SCRIPT.ALARM_SOUND).resolve()))
-                print(input("Press any key to continue..."))
+                self.window.activate_script_window()
+                print(input("Press enter to continue..."))
+                self.window.activate_game_window()
                 with keyboard.Listener(on_release=self._on_release) as listner:
                     listner.join()
                 logger.info("Continue running script")
@@ -672,6 +740,7 @@ class Player:
         :param msg: the cause of the termination
         :type msg: str
         """
+        logger.critical(msg)
         sleep(ANIMATION_DELAY)
         pag.press("esc")
         # pag.click()  # Avoid possible ClickLock stuck
@@ -880,19 +949,19 @@ class Player:
         if scrollbar_position is None:
             logger.info("Scroll bar not found, changing lures for normal rig")
             while self._open_broken_lure_menu():
-                self._replace_selected_item()
+                self._replace_item(lure=True)
             pag.press("v")
             return
 
         logger.info("Scroll bar found, changing lures for dropshot rig")
         pag.moveTo(scrollbar_position)
         for _ in range(5):
-            sleep(1)
+            sleep(ANIMATION_DELAY)
             pag.drag(xOffset=0, yOffset=125, duration=0.5, button="left")
 
             replaced = False
             while self._open_broken_lure_menu():
-                self._replace_selected_item()
+                self._replace_item(lure=True)
                 replaced = True
 
             if replaced:
@@ -913,39 +982,39 @@ class Player:
             return False
 
         # click item to open selection menu
-        logger.info("Broken lure found")
         pag.moveTo(broken_item_position)
         sleep(ANIMATION_DELAY)
         pag.click()
         sleep(ANIMATION_DELAY)
         return True
 
-    def _replace_selected_item(self) -> None:
+    def _replace_item(self, lure: bool) -> None:
         """Select a favorite item for replacement and replace the broken one."""
-        logger.info("Search for favorite items")
+        logger.info("Searching for favorite items")
         favorite_item_positions = self.detection.get_favorite_item_positions()
         while True:
             favorite_item_position = next(favorite_item_positions, None)
-
             if favorite_item_position is None:
-                msg = "Lure for replacement not found"
-                logger.warning(msg)
-                pag.press("esc")
-                sleep(ANIMATION_DELAY)
-                pag.press("esc")
-                sleep(ANIMATION_DELAY)
-                self.general_quit(msg)
+                # TODO: different tackle?
+                msg = "Favorite item not found"
+                logger.critical(msg)
+                sys.exit(1)
+                # pag.press("esc")
+                # sleep(ANIMATION_DELAY)
+                # pag.press("esc")
+                # sleep(ANIMATION_DELAY)
+                # self.general_quit(msg)
 
             # Check if the lure for replacement is already broken
             x, y = utils.get_box_center(favorite_item_position)
-            if pag.pixel(x - 75, y + 190) != (178, 59, 30):  # Magic value
-                logger.info("The broken lure has been replaced")
-                pag.moveTo(x - 75, y + 190)
+            if pag.pixel(x - 60, y + 190) != (178, 59, 30):  # Magic value
+                logger.info("Item has been replaced")
+                pag.moveTo(x - 60, y + 190)
                 pag.click(clicks=2, interval=0.1)
                 sleep(WEAR_TEXT_UPDATE_DELAY)
                 break
 
-            logger.warning("Lure for replacement found but already broken")
+            logger.warning("Favorite item found but not available")
 
     def _put_down_tackle(self, check_miss_counts: list[int]) -> None:
         """Update counters, put down the tackle and wait for a while.
@@ -956,10 +1025,12 @@ class Player:
         :type rod_idx: int
         """
         self.cast_miss_count += 1
-        check_miss_counts[self.rod_idx] += 1
-        if check_miss_counts[self.rod_idx] >= self.cfg.SELECTED.CHECK_MISS_LIMIT:
-            check_miss_counts[self.rod_idx] = 0
+        check_miss_counts[self.tackle_idx] += 1
+        if check_miss_counts[self.tackle_idx] >= self.cfg.SELECTED.CHECK_MISS_LIMIT:
+            check_miss_counts[self.tackle_idx] = 0
             self._reset_tackle()
+            self._refill_groundbait()
+            self._refill_pva()
             self._cast_tackle(lock=True)
 
         pag.press("0")
@@ -982,3 +1053,14 @@ class Player:
             return
         pag.keyDown(LEFT_KEY if self.cfg.ARGS.TROLLING == "left" else RIGHT_KEY)
 
+
+
+    def test(self):
+        """Boo!"""
+        while True:
+            sleep(0.1)
+            print(self.detection.is_pva_chosen())
+            print(self.detection.is_groundbait_chosen())
+            print(self.detection.is_bait_chosen())
+
+            # print(self.detection.get_groundbait_slot_position())
